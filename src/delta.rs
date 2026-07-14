@@ -83,7 +83,10 @@ pub fn render(raw: &[u8], width: u16, theme: Option<&str>) -> Result<Text<'stati
     let _ = writer.join();
 
     if !out.status.success() && out.stdout.is_empty() {
-        bail!("delta failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "delta failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
 
     out.stdout

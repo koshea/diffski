@@ -12,17 +12,20 @@ automatically as files change on disk. Diffs are rendered by
 highlighting, and your existing `[delta]` gitconfig for free.
 
 ```
-┌ changed files (5) ──────────┐┌ M src/main.rs ───────────────────────────┐
-│  ? fresh.rs                 ││ src/main.rs                              │
-│  M notes.txt                ││ ───┐                                     │
-│▶ M src/main.rs              ││ 1: │                                     │
-│  A staged_add.rs            ││     fn main() {                          │
-│  D util.py                  ││ -       let x = 1;                       │
-│                             ││ +       let x = 42;                      │
-│                             ││ +       let y = 7;                       │
-└─────────────────────────────┘└──────────────────────────────────────────┘
- ↑/↓ file  PgUp/PgDn scroll  s sort  r rev  t theme  b base  / search  q quit   diff: HEAD · sort: tree ▲
+┌ changed files (3) ─────────┐┌ M src/main.rs ─────────────────────────────┐
+│▶ M src/main.rs             ││src/main.rs                                 │
+│  M notes.txt               ││────────────────────────────────────────────│
+│  ? fresh.txt               ││ fn main() {                                │
+│                            ││-    let x = 1;                             │
+│                            ││+    let x = 42;                            │
+│                            ││+    let y = 7;                             │
+│                            ││     println!("hello");                     │
+│                            ││ }                                          │
+└────────────────────────────┘└────────────────────────────────────────────┘
+↑/↓ file · PgUp/PgDn scroll · s sort · t theme · b base · / search · q quit
 ```
+
+(delta renders the real thing with full color, syntax highlighting, and line numbers.)
 
 ## What it shows
 
@@ -46,10 +49,19 @@ Deletions and renames show up in both. `.gitignore` is honored.
 
 ## Install
 
+Straight from git (installs the `diffski` binary into `~/.cargo/bin`):
+
 ```sh
+cargo install --git https://github.com/koshea/diffski
+```
+
+Or from a local checkout:
+
+```sh
+git clone https://github.com/koshea/diffski
+cd diffski
 cargo install --path .
-# or, from a checkout:
-cargo build --release   # binary at target/release/diffski
+# or just build it: cargo build --release  (binary at target/release/diffski)
 ```
 
 ## Usage

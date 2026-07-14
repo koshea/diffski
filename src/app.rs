@@ -194,7 +194,10 @@ impl App {
     fn current_anchor(&self) -> Option<(String, u16)> {
         let &i = self.filtered.get(self.selected)?;
         let base = self.offsets.get(self.selected).copied().unwrap_or(0) as u16;
-        Some((self.files[i].path.clone(), self.diff_scroll.saturating_sub(base)))
+        Some((
+            self.files[i].path.clone(),
+            self.diff_scroll.saturating_sub(base),
+        ))
     }
 
     // --- data refresh ------------------------------------------------------
@@ -284,7 +287,11 @@ impl App {
         let width = self.diff_width;
         let root = self.root.clone();
         let base = self.base.clone();
-        let entries: Vec<FileEntry> = self.filtered.iter().map(|&i| self.files[i].clone()).collect();
+        let entries: Vec<FileEntry> = self
+            .filtered
+            .iter()
+            .map(|&i| self.files[i].clone())
+            .collect();
 
         // Pre-warm the cache for cold files concurrently. This is where startup
         // time goes: each cold file needs a `git diff` + `delta` subprocess.
@@ -299,13 +306,20 @@ impl App {
             let root = root.clone();
             let base = base.clone();
             let e = entry.clone();
-            match self.cache.get_or_render(&entry.path, sig, width, self.theme.as_deref(), move || {
-                git::raw_diff(&root, &e, &base)
-            }) {
+            match self.cache.get_or_render(
+                &entry.path,
+                sig,
+                width,
+                self.theme.as_deref(),
+                move || git::raw_diff(&root, &e, &base),
+            ) {
                 Ok(text) if text.lines.is_empty() => lines.push(Line::from("  (no textual diff)")),
                 Ok(text) => lines.extend(text.lines),
                 Err(err) => {
-                    lines.push(Line::from(format!("  error rendering {}: {err}", entry.path)));
+                    lines.push(Line::from(format!(
+                        "  error rendering {}: {err}",
+                        entry.path
+                    )));
                     self.status = err.to_string();
                 }
             }
@@ -318,7 +332,10 @@ impl App {
 
         // Restore the viewport onto the previously anchored file, if still present.
         if let Some((path, intra)) = self.restore_anchor.take()
-            && let Some(pos) = self.filtered.iter().position(|&i| self.files[i].path == path)
+            && let Some(pos) = self
+                .filtered
+                .iter()
+                .position(|&i| self.files[i].path == path)
         {
             self.selected = pos;
             self.diff_scroll = (self.offsets[pos] as u16).saturating_add(intra);
@@ -360,7 +377,9 @@ impl App {
                         let rendered = git::raw_diff(root, entry, base)
                             .and_then(|raw| delta::render(&raw, width, theme.as_deref()))
                             .map_err(|e| e.to_string());
-                        out.lock().unwrap().push((entry.path.clone(), sig, rendered));
+                        out.lock()
+                            .unwrap()
+                            .push((entry.path.clone(), sig, rendered));
                     }
                 });
             }

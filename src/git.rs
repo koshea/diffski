@@ -53,14 +53,14 @@ pub fn repo_root(path: &Path) -> Result<PathBuf> {
         .output()
         .context("failed to run `git` — is it installed and on PATH?")?;
     if !out.status.success() {
-        bail!(
-            "not a git repository: {}",
-            path.display()
-        );
+        bail!("not a git repository: {}", path.display());
     }
     let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if root.is_empty() {
-        bail!("could not resolve git repository root for {}", path.display());
+        bail!(
+            "could not resolve git repository root for {}",
+            path.display()
+        );
     }
     Ok(PathBuf::from(root))
 }
@@ -90,12 +90,7 @@ pub fn changed_files(root: &Path) -> Result<Vec<FileEntry>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args([
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .output()
         .context("failed to run `git status`")?;
     if !out.status.success() {
