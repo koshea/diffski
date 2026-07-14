@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::delta::{self, DiffCache};
 use crate::git::{self, FileEntry};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -185,8 +185,17 @@ impl App {
     }
 
     fn max_scroll(&self) -> u16 {
-        let lines = self.combined.lines.len() as u16;
-        lines.saturating_sub(self.diff_viewport_height)
+        let total = self.combined.lines.len() as u16;
+        // Everything fits: no scrolling.
+        if total <= self.diff_viewport_height {
+            return 0;
+        }
+        // Normally stop when the last line reaches the bottom of the viewport.
+        // But also allow scrolling far enough that the *last file* can sit at the
+        // top — otherwise a short final file could never be navigated to.
+        let fit = total - self.diff_viewport_height;
+        let last_file = self.offsets.last().copied().unwrap_or(0) as u16;
+        fit.max(last_file).min(total - 1)
     }
 
     /// The current viewport position as `(path, offset within that file)`, so it
@@ -314,7 +323,13 @@ impl App {
                 move || git::raw_diff(&root, &e, &base),
             ) {
                 Ok(text) if text.lines.is_empty() => lines.push(Line::from("  (no textual diff)")),
-                Ok(text) => lines.extend(text.lines),
+                Ok(text) => {
+                    // delta doesn't wrap long lines when piped, so wrap here —
+                    // keeping one row per line so scroll offsets stay exact.
+                    for line in text.lines {
+                        wrap_line_into(&line, width as usize, &mut lines);
+                    }
+                }
                 Err(err) => {
                     lines.push(Line::from(format!(
                         "  error rendering {}: {err}",
@@ -625,4 +640,39 @@ fn signature(entry: &FileEntry) -> u64 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     nanos ^ (entry.kind as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+/// Hard-wrap a styled line to `width` columns, appending one `Line` per visual
+/// row to `out` (styles preserved). This keeps the invariant that one `Line` is
+/// exactly one rendered row, which the scroll/offset logic relies on. Width is
+/// approximated as one column per char (fine for the ASCII-heavy content of
+/// diffs; wide glyphs are rare here).
+fn wrap_line_into(line: &Line<'static>, width: usize, out: &mut Vec<Line<'static>>) {
+    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if width == 0 || total <= width {
+        out.push(line.clone());
+        return;
+    }
+
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    for span in &line.spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for c in span.content.chars() {
+            buf.push(c);
+            col += 1;
+            if col >= width {
+                row.push(Span::styled(std::mem::take(&mut buf), style));
+                out.push(Line::from(std::mem::take(&mut row)));
+                col = 0;
+            }
+        }
+        if !buf.is_empty() {
+            row.push(Span::styled(buf, style));
+        }
+    }
+    if !row.is_empty() {
+        out.push(Line::from(row));
+    }
 }
