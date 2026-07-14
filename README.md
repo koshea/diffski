@@ -86,8 +86,24 @@ as the agent works (filesystem writes are debounced ~150 ms).
 | `r` | reverse sort direction |
 | `t` / `T` | cycle syntax theme forward / back |
 | `b` | toggle diff mode: working changes ⇄ vs base branch |
+| `y` | copy the current text selection |
 | `/` | search filenames (type to filter; `Enter` accepts, `Esc` clears) |
+| `?` | show the help overlay |
 | `q` / `Esc` / `Ctrl-C` | quit |
+
+## Mouse
+
+diffski captures the mouse, so:
+
+- **Wheel** scrolls the diff (over the file list, it moves between files).
+- **Click** a file to jump to it, or click in the diff to place the cursor.
+- **Drag in the diff** to select text — just the diff content, no borders or the
+  file column. The selection is copied to your clipboard on release (via OSC 52,
+  which works locally and over SSH; in tmux, enable `set-clipboard on`). Press
+  `y` to copy again.
+- **Drag the divider** between the panes to resize them; the width is remembered.
+
+A live scrollbar on the diff shows your position in the whole changeset.
 
 ## Themes
 
@@ -104,7 +120,7 @@ specifies. The theme you pick with `t`/`--theme` is remembered (see below).
 
 ## Remembered settings
 
-Your sort order, theme, and diff mode are persisted to
+Your sort order, theme, diff mode, and pane split are persisted to
 `$XDG_CONFIG_HOME/diffski/config` (default `~/.config/diffski/config`), so diffski
 opens the same way every time.
 

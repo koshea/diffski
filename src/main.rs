@@ -16,7 +16,11 @@ use app::App;
 use clap::Parser;
 use config::Config;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -63,10 +67,60 @@ fn main() -> Result<()> {
 
     let mut app = App::new(root, config);
 
+    // `ratatui::init()` installs a panic hook that restores the terminal, but it
+    // doesn't know about mouse capture — chain a hook that disables it too, so a
+    // panic never leaves the terminal in mouse-reporting mode.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        prev_hook(info);
+    }));
+
     let mut terminal = ratatui::init();
+    let mouse_on = execute!(io::stdout(), EnableMouseCapture).is_ok();
     let result = run(&mut terminal, &mut app, rx);
+    if mouse_on {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     result
+}
+
+/// Copy `text` to the system clipboard via an OSC 52 escape sequence. Works in
+/// most modern terminals and over SSH (and through tmux with `set-clipboard on`).
+fn copy_to_clipboard(text: &str) {
+    let b64 = base64_encode(text.as_bytes());
+    let mut stdout = io::stdout();
+    // ESC ] 52 ; c ; <base64> BEL
+    let _ = write!(stdout, "\x1b]52;c;{b64}\x07");
+    let _ = stdout.flush();
+}
+
+/// Minimal standard base64 encoder (avoids a dependency for the OSC 52 payload).
+fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(T[(n >> 18 & 63) as usize] as char);
+        out.push(T[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 fn run(
@@ -84,7 +138,9 @@ fn run(
         // Build (or rebuild) the combined diff *after* the frame is on screen, so
         // the file list appears instantly and a "rendering…" placeholder shows
         // while the diffs are produced. `diff_width` is known once we've drawn.
-        if app.needs_build() {
+        // Skip while the divider is being dragged so we don't re-render every
+        // file on each drag step; it rebuilds once the drag ends.
+        if app.needs_build() && !app.is_dragging() {
             app.ensure_combined();
             dirty = true;
             continue;
@@ -97,9 +153,18 @@ fn run(
                     app.handle_key(key);
                     dirty = true;
                 }
+                Event::Mouse(m) => {
+                    app.handle_mouse(m);
+                    dirty = true;
+                }
                 Event::Resize(_, _) => dirty = true,
                 _ => {}
             }
+        }
+
+        // Emit any queued clipboard copy (from a text selection).
+        if let Some(text) = app.pending_copy.take() {
+            copy_to_clipboard(&text);
         }
 
         // Coalesce all pending filesystem changes into one refresh.
@@ -117,4 +182,24 @@ fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_encode;
+
+    #[test]
+    fn base64_rfc4648_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(input.as_bytes()), expected, "input={input:?}");
+        }
+    }
 }

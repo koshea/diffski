@@ -4,6 +4,7 @@
 //! Everything shells out to `git` so behavior matches the user's own git config.
 
 use anyhow::{Context, Result, bail};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -42,6 +43,9 @@ pub struct FileEntry {
     /// Worktree mtime, used for the "sort by modified date" mode. Deleted files
     /// (no worktree entry) fall back to the UNIX epoch.
     pub mtime: SystemTime,
+    /// Added / removed line counts (`None` for binary files or when unknown).
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
 }
 
 /// Resolve the git repository (or worktree) root for `path`.
@@ -123,12 +127,19 @@ pub fn changed_files(root: &Path) -> Result<Vec<FileEntry>> {
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        entries.push(FileEntry { path, kind, mtime });
+        entries.push(FileEntry {
+            path,
+            kind,
+            mtime,
+            added: None,
+            removed: None,
+        });
 
         // Skip the original-path token that follows a rename/copy record.
         i += if is_rename { 2 } else { 1 };
     }
 
+    fill_stats(root, &diff_base(root), &mut entries);
     Ok(entries)
 }
 
@@ -150,6 +161,57 @@ fn mtime_of(root: &Path, path: &str) -> SystemTime {
     std::fs::metadata(root.join(path))
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+/// Added/removed line counts per path, from `git diff --numstat <base>`.
+/// Binary files (numstat `-`) are omitted.
+fn numstat(root: &Path, base: &str) -> HashMap<String, (u32, u32)> {
+    let mut map = HashMap::new();
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--numstat", base])
+        .output()
+    else {
+        return map;
+    };
+    if !out.status.success() {
+        return map;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.splitn(3, '\t');
+        let (Some(a), Some(d), Some(path)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        // Renames appear as "old => new"; index by the new path we display.
+        let path = path
+            .rsplit(" => ")
+            .next()
+            .unwrap_or(path)
+            .trim_end_matches('}');
+        if let (Ok(a), Ok(d)) = (a.parse::<u32>(), d.parse::<u32>()) {
+            map.insert(path.to_string(), (a, d));
+        }
+    }
+    map
+}
+
+/// Fill each entry's added/removed counts. Tracked files come from `numstat`;
+/// untracked files count their whole contents as additions.
+fn fill_stats(root: &Path, base: &str, entries: &mut [FileEntry]) {
+    let stats = numstat(root, base);
+    for e in entries.iter_mut() {
+        if e.kind == ChangeKind::Untracked {
+            let lines = std::fs::read_to_string(root.join(&e.path))
+                .map(|s| s.lines().count() as u32)
+                .ok();
+            e.added = lines;
+            e.removed = Some(0);
+        } else if let Some(&(a, d)) = stats.get(&e.path) {
+            e.added = Some(a);
+            e.removed = Some(d);
+        }
+    }
 }
 
 /// Resolve the base branch to diff against: the remote's default branch if known
@@ -243,11 +305,18 @@ pub fn branch_changes(root: &Path, base: &str) -> Result<Vec<FileEntry>> {
             _ => ChangeKind::Modified,
         };
         let mtime = mtime_of(root, &path);
-        entries.push(FileEntry { path, kind, mtime });
+        entries.push(FileEntry {
+            path,
+            kind,
+            mtime,
+            added: None,
+            removed: None,
+        });
         i += step;
     }
 
     entries.extend(untracked_files(root)?);
+    fill_stats(root, base, &mut entries);
     Ok(entries)
 }
 
@@ -272,6 +341,8 @@ fn untracked_files(root: &Path) -> Result<Vec<FileEntry>> {
                 path,
                 kind: ChangeKind::Untracked,
                 mtime,
+                added: None,
+                removed: None,
             });
         } else if tok.len() >= 2 && matches!(tok.as_bytes()[0], b'R' | b'C') {
             // Consume the rename original-path token so it isn't misread.

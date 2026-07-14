@@ -9,8 +9,12 @@
 use crate::config::Config;
 use crate::delta::{self, DiffCache};
 use crate::git::{self, FileEntry};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::ListState;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -97,6 +101,28 @@ pub enum Mode {
     Search,
 }
 
+/// A text selection in the combined diff, in `(line, column)` coordinates where
+/// `line` indexes `combined.lines` and `column` is a char offset within it.
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub cursor: (usize, usize),
+}
+
+impl Selection {
+    /// `(start, end)` ordered so start <= end.
+    pub fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
+}
+
 pub struct App {
     pub root: PathBuf,
     /// Diff base: `HEAD`/empty tree in working mode, or the merge base in
@@ -141,6 +167,24 @@ pub struct App {
     /// After a rebuild, restore the viewport onto this `(path, intra-file offset)`.
     restore_anchor: Option<(String, u16)>,
 
+    // --- layout & mouse (updated during draw / by mouse events) ------------
+    /// Left-pane width as a percentage of the terminal.
+    pub split_pct: u16,
+    /// Pane rectangles from the last render, for mouse hit-testing.
+    pub area_main: Rect,
+    pub area_left: Rect,
+    pub area_right: Rect,
+    /// File-list scroll state (kept across frames for click mapping).
+    pub list_state: ListState,
+    dragging_divider: bool,
+
+    /// Active text selection in the diff pane, if any.
+    pub selection: Option<Selection>,
+    selecting: bool,
+    /// Text queued to be copied to the clipboard by the event loop.
+    pub pending_copy: Option<String>,
+
+    pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
 }
@@ -169,6 +213,16 @@ impl App {
             needs_rebuild: true,
             built_width: 0,
             restore_anchor: None,
+            split_pct: config.split_pct.clamp(15, 85),
+            area_main: Rect::default(),
+            area_left: Rect::default(),
+            area_right: Rect::default(),
+            list_state: ListState::default(),
+            dragging_divider: false,
+            selection: None,
+            selecting: false,
+            pending_copy: None,
+            show_help: false,
             status: String::new(),
             should_quit: false,
         };
@@ -261,6 +315,7 @@ impl App {
             sort_desc: self.sort_desc,
             theme: self.theme.clone(),
             diff_mode: self.diff_mode,
+            split_pct: self.split_pct,
         }
         .save();
     }
@@ -408,22 +463,26 @@ impl App {
         }
     }
 
+    /// Index of the file whose section contains combined-diff line `line`.
+    fn file_at_line(&self, line: usize) -> usize {
+        let mut sel = 0;
+        for (idx, &off) in self.offsets.iter().enumerate() {
+            if off <= line {
+                sel = idx;
+            } else {
+                break;
+            }
+        }
+        sel
+    }
+
     /// Set `selected` to whichever file's section contains the top of the viewport.
     fn update_selected_from_scroll(&mut self) {
         if self.offsets.is_empty() {
             self.selected = 0;
             return;
         }
-        let s = self.diff_scroll as usize;
-        let mut sel = 0;
-        for (idx, &off) in self.offsets.iter().enumerate() {
-            if off <= s {
-                sel = idx;
-            } else {
-                break;
-            }
-        }
-        self.selected = sel;
+        self.selected = self.file_at_line(self.diff_scroll as usize);
     }
 
     fn scroll_to_selected(&mut self) {
@@ -577,10 +636,181 @@ impl App {
             self.should_quit = true;
             return;
         }
+        // While help is open, any key (except quit) dismisses it.
+        if self.show_help {
+            if matches!(key.code, KeyCode::Char('q')) {
+                self.should_quit = true;
+            }
+            self.show_help = false;
+            return;
+        }
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Search => self.handle_search_key(key),
         }
+    }
+
+    // --- mouse -------------------------------------------------------------
+
+    pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        let (col, row) = (ev.column, ev.row);
+
+        // Any click dismisses the help overlay.
+        if self.show_help && matches!(ev.kind, MouseEventKind::Down(_)) {
+            self.show_help = false;
+            return;
+        }
+
+        match ev.kind {
+            MouseEventKind::ScrollDown => {
+                if self.in_left(col) {
+                    self.select_next();
+                } else {
+                    self.scroll_down(3);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if self.in_left(col) {
+                    self.select_prev();
+                } else {
+                    self.scroll_up(3);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = None;
+                if self.near_divider(col) {
+                    self.dragging_divider = true;
+                } else if self.in_left(col) {
+                    self.click_toc(row);
+                } else if self.in_diff(col, row) {
+                    self.begin_selection(col, row);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.dragging_divider {
+                    self.set_split_from_col(col);
+                } else if self.selecting {
+                    self.update_selection(col, row);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.dragging_divider {
+                    self.dragging_divider = false;
+                    self.save_config();
+                } else if self.selecting {
+                    self.selecting = false;
+                    self.copy_selection();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True while a divider drag is in progress (used to defer diff rebuilds).
+    pub fn is_dragging(&self) -> bool {
+        self.dragging_divider
+    }
+
+    fn divider_col(&self) -> u16 {
+        self.area_left.x + self.area_left.width
+    }
+
+    fn near_divider(&self, col: u16) -> bool {
+        let b = self.divider_col();
+        col + 1 >= b && col <= b
+    }
+
+    fn in_left(&self, col: u16) -> bool {
+        col >= self.area_left.x && col + 1 < self.divider_col()
+    }
+
+    fn in_diff(&self, col: u16, row: u16) -> bool {
+        // Inside the diff pane's inner (content) area, excluding borders.
+        col > self.area_right.x
+            && col < self.area_right.x + self.area_right.width.saturating_sub(1)
+            && row > self.area_right.y
+            && row < self.area_right.y + self.area_right.height.saturating_sub(1)
+    }
+
+    fn click_toc(&mut self, row: u16) {
+        // Rows inside the list start one below the top border.
+        let top = self.area_left.y + 1;
+        if row < top {
+            return;
+        }
+        let idx = self.list_state.offset() + (row - top) as usize;
+        if idx < self.filtered.len() {
+            self.selected = idx;
+            self.scroll_to_selected();
+        }
+    }
+
+    /// Map a diff-pane cell to a `(line, column)` in the combined diff.
+    fn diff_cell(&self, col: u16, row: u16) -> (usize, usize) {
+        let inner_top = self.area_right.y + 1;
+        let inner_left = self.area_right.x + 1;
+        let line = self.diff_scroll as usize + row.saturating_sub(inner_top) as usize;
+        let line = line.min(self.combined.lines.len().saturating_sub(1));
+        let column = col.saturating_sub(inner_left) as usize;
+        (line, column)
+    }
+
+    fn begin_selection(&mut self, col: u16, row: u16) {
+        let pos = self.diff_cell(col, row);
+        self.selection = Some(Selection {
+            anchor: pos,
+            cursor: pos,
+        });
+        self.selecting = true;
+        self.selected = self.file_at_line(pos.0);
+    }
+
+    fn update_selection(&mut self, col: u16, row: u16) {
+        let pos = self.diff_cell(col, row);
+        if let Some(sel) = &mut self.selection {
+            sel.cursor = pos;
+        }
+    }
+
+    /// Copy the current selection's plain text to the clipboard (queued for the
+    /// event loop to emit as an OSC 52 sequence).
+    pub fn copy_selection(&mut self) {
+        let Some(sel) = self.selection else { return };
+        if sel.is_empty() {
+            return;
+        }
+        let (start, end) = sel.ordered();
+        let mut out = String::new();
+        for li in start.0..=end.0 {
+            let Some(line) = self.combined.lines.get(li) else {
+                break;
+            };
+            let chars: Vec<char> = line.spans.iter().flat_map(|s| s.content.chars()).collect();
+            let from = if li == start.0 { start.1 } else { 0 };
+            let to = if li == end.0 { end.1 } else { chars.len() };
+            let from = from.min(chars.len());
+            let to = to.min(chars.len()).max(from);
+            out.extend(&chars[from..to]);
+            if li != end.0 {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            return;
+        }
+        let n = out.chars().count();
+        self.pending_copy = Some(out);
+        self.status = format!("copied {n} chars");
+    }
+
+    fn set_split_from_col(&mut self, col: u16) {
+        let main = self.area_main;
+        if main.width == 0 {
+            return;
+        }
+        let left_w = col.saturating_sub(main.x);
+        let pct = (left_w as u32 * 100 / main.width as u32) as u16;
+        self.split_pct = pct.clamp(15, 85);
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
@@ -597,6 +827,8 @@ impl App {
             KeyCode::Char('t') => self.cycle_theme(1),
             KeyCode::Char('T') => self.cycle_theme(-1),
             KeyCode::Char('b') => self.toggle_diff_mode(),
+            KeyCode::Char('y') => self.copy_selection(),
+            KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('/') => {
                 self.mode = Mode::Search;
                 self.search.clear();

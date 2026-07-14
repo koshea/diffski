@@ -11,6 +11,8 @@ pub struct Config {
     pub sort_desc: bool,
     pub theme: Option<String>,
     pub diff_mode: DiffMode,
+    /// Left (file-list) pane width as a percentage of the terminal.
+    pub split_pct: u16,
 }
 
 impl Default for Config {
@@ -20,6 +22,7 @@ impl Default for Config {
             sort_desc: false,
             theme: None,
             diff_mode: DiffMode::Working,
+            split_pct: 30,
         }
     }
 }
@@ -52,6 +55,11 @@ impl Config {
                         cfg.diff_mode = v;
                     }
                 }
+                "split_pct" => {
+                    if let Ok(v) = value.parse::<u16>() {
+                        cfg.split_pct = v.clamp(15, 85);
+                    }
+                }
                 _ => {}
             }
         }
@@ -68,11 +76,12 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         let body = format!(
-            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\n",
+            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\n",
             self.sort_field.as_key(),
             self.sort_desc,
             self.theme.as_deref().unwrap_or(""),
             self.diff_mode.as_key(),
+            self.split_pct,
         );
         let _ = std::fs::write(&path, body);
     }
