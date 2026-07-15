@@ -128,11 +128,26 @@ diffski --list-themes      # see what's available
 With no `--theme`, diffski uses whatever your gitconfig `[delta] syntax-theme`
 specifies. The theme you pick with `t`/`--theme` is remembered (see below).
 
+## Updating
+
+diffski keeps itself up to date. On startup (at most once a day, in the
+background) it runs `cargo install --git` again; when a newer version is
+available it rebuilds and swaps the binary, and you pick it up on the next
+launch (you'll see a "restart to apply" note when one lands). Updates ship when
+the crate version is bumped, so you don't recompile on every commit.
+
+Disable it for one run with `--no-update`, or permanently with
+`auto_update=false` in the config. To update by hand:
+
+```sh
+cargo install --git https://github.com/koshea/diffski --force
+```
+
 ## Remembered settings
 
-Your sort order, theme, diff mode, and pane split are persisted to
-`$XDG_CONFIG_HOME/diffski/config` (default `~/.config/diffski/config`), so diffski
-opens the same way every time.
+Your sort order, theme, diff mode, pane split, follow-latest, and auto-update
+preference are persisted to `$XDG_CONFIG_HOME/diffski/config` (default
+`~/.config/diffski/config`), so diffski opens the same way every time.
 
 ## How it works
 

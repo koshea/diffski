@@ -15,6 +15,8 @@ pub struct Config {
     pub split_pct: u16,
     /// Follow-latest: jump the view to files as they change on disk.
     pub follow: bool,
+    /// Check for and install updates in the background on startup.
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             diff_mode: DiffMode::Working,
             split_pct: 30,
             follow: false,
+            auto_update: true,
         }
     }
 }
@@ -64,6 +67,7 @@ impl Config {
                     }
                 }
                 "follow" => cfg.follow = value == "true",
+                "auto_update" => cfg.auto_update = value != "false",
                 _ => {}
             }
         }
@@ -80,13 +84,14 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         let body = format!(
-            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\n",
+            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\nauto_update={}\n",
             self.sort_field.as_key(),
             self.sort_desc,
             self.theme.as_deref().unwrap_or(""),
             self.diff_mode.as_key(),
             self.split_pct,
             self.follow,
+            self.auto_update,
         );
         let _ = std::fs::write(&path, body);
     }

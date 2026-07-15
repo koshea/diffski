@@ -50,40 +50,64 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(path) = app.current_entry().map(|e| e.path.clone()) {
         app.mark_viewed(&path);
     }
+    // Restart the marquee when the selection changes.
+    if app.selected != app.marquee_sel {
+        app.marquee_sel = app.selected;
+        app.marquee_reset();
+    }
+
+    // Width available for a row's content (inside borders, minus the 2-col
+    // highlight symbol that the List reserves on every row).
+    let row_w = (area.width.saturating_sub(2) as usize).saturating_sub(2);
+    let offset = app.marquee_offset;
 
     let (mut total_add, mut total_del) = (0u32, 0u32);
-    let items: Vec<ListItem> = app
-        .filtered
-        .iter()
-        .map(|&i| {
-            let entry = &app.files[i];
-            let (marker, color) = marker_style(entry.kind);
-            let mut spans = vec![
-                Span::styled(format!("{marker} "), Style::default().fg(color)),
-                Span::raw(entry.path.clone()),
-            ];
-            // Per-file +/- line counts.
-            if let Some(a) = entry.added.filter(|&a| a > 0) {
-                total_add += a;
-                spans.push(Span::styled(
-                    format!(" +{a}"),
-                    Style::default().fg(Color::Green),
-                ));
-            }
-            if let Some(d) = entry.removed.filter(|&d| d > 0) {
-                total_del += d;
-                spans.push(Span::styled(
-                    format!(" -{d}"),
-                    Style::default().fg(Color::Red),
-                ));
-            }
-            // Cue for files changed on disk that you haven't looked at yet.
-            if app.recently_changed.contains(&entry.path) {
-                spans.push(Span::styled(" ●", Style::default().fg(Color::Cyan)));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+    let mut active_overflow = false;
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.filtered.len());
+
+    for (row, &i) in app.filtered.iter().enumerate() {
+        let entry = &app.files[i];
+        let (marker, color) = marker_style(entry.kind);
+
+        // Right-hand side: +/- stats and the recently-changed cue. Measure their
+        // width so the (truncated) path takes exactly the remaining space.
+        let mut tail_spans: Vec<Span> = Vec::new();
+        let mut tail_w = 0usize;
+        if let Some(a) = entry.added.filter(|&a| a > 0) {
+            total_add += a;
+            let s = format!(" +{a}");
+            tail_w += s.chars().count();
+            tail_spans.push(Span::styled(s, Style::default().fg(Color::Green)));
+        }
+        if let Some(d) = entry.removed.filter(|&d| d > 0) {
+            total_del += d;
+            let s = format!(" -{d}");
+            tail_w += s.chars().count();
+            tail_spans.push(Span::styled(s, Style::default().fg(Color::Red)));
+        }
+        if app.recently_changed.contains(&entry.path) {
+            tail_w += 2; // " ●"
+            tail_spans.push(Span::styled(" ●", Style::default().fg(Color::Cyan)));
+        }
+
+        let path_avail = row_w.saturating_sub(2 + tail_w); // 2 = "M " marker
+        let full_len = entry.path.chars().count();
+        let path = if row == app.selected && full_len > path_avail && path_avail > 4 {
+            // Marquee the selected file's overflowing name so it can be read.
+            active_overflow = true;
+            marquee(&entry.path, path_avail, offset)
+        } else {
+            truncate_middle(&entry.path, path_avail)
+        };
+
+        let mut spans = vec![
+            Span::styled(format!("{marker} "), Style::default().fg(color)),
+            Span::raw(path),
+        ];
+        spans.extend(tail_spans);
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    app.active_path_overflow = active_overflow;
 
     // Changeset summary in the panel title: N files · +added -removed.
     let mut title = vec![Span::raw(format!(
@@ -118,13 +142,13 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_diff(f: &mut Frame, app: &App, area: Rect) {
     let title = match app.current_entry() {
-        Some(e) => format!(
-            " {} {}   [{} / {}] ",
-            e.kind.marker(),
-            e.path,
-            app.diff_scroll,
-            app.combined.lines.len(),
-        ),
+        Some(e) => {
+            let prefix = format!(" {} ", e.kind.marker());
+            let suffix = format!("   [{} / {}] ", app.diff_scroll, app.combined.lines.len());
+            let inner = area.width.saturating_sub(2) as usize;
+            let avail = inner.saturating_sub(prefix.chars().count() + suffix.chars().count());
+            format!("{prefix}{}{suffix}", truncate_middle(&e.path, avail))
+        }
         None => " diff ".to_string(),
     };
     let block = panel(title);
@@ -185,10 +209,19 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("▏", dim),
             Span::styled("   (Enter to accept · Esc to clear)", dim),
         ]),
-        Mode::Normal if !app.status.is_empty() => Line::from(Span::styled(
-            app.status.clone(),
-            Style::default().fg(Color::Green),
-        )),
+        Mode::Normal if !app.status.is_empty() => {
+            let mut spans = vec![Span::styled(
+                app.status.clone(),
+                Style::default().fg(Color::Green),
+            )];
+            if app.update_ready {
+                spans.push(Span::styled(
+                    "   ⟳ restart to apply",
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            Line::from(spans)
+        }
         Mode::Normal => {
             let follow = if app.follow { "  ·  follow" } else { "" };
             let info = format!(
@@ -316,6 +349,46 @@ fn highlight_range(line: &Line<'static>, cs: usize, ce: usize) -> Line<'static> 
         col = s1;
     }
     Line::from(out)
+}
+
+/// Shorten `s` to `max` columns with a middle ellipsis, keeping more of the tail
+/// (the filename) than the head, since paths tend to share a long prefix.
+fn truncate_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    if max == 0 {
+        return String::new();
+    }
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 3 {
+        // Too tight for an ellipsis; show the tail (the distinguishing end).
+        return chars[n - max..].iter().collect();
+    }
+    let keep = max - 1; // room for the ellipsis
+    let head = keep / 3;
+    let tail = keep - head;
+    let mut out = String::with_capacity(max);
+    out.extend(&chars[..head]);
+    out.push('…');
+    out.extend(&chars[n - tail..]);
+    out
+}
+
+/// A horizontally scrolling window of `s` (with a separator), `width` columns
+/// wide, advanced by `offset`. Used for the selected file's overflowing name.
+fn marquee(s: &str, width: usize, offset: usize) -> String {
+    let mut ring: Vec<char> = s.chars().collect();
+    if ring.len() <= width {
+        return s.to_string();
+    }
+    ring.extend("   ·   ".chars());
+    let len = ring.len();
+    // Hold at the start for a beat so the beginning is readable before scrolling.
+    const PAUSE: usize = 8;
+    let start = offset.saturating_sub(PAUSE) % len;
+    (0..width).map(|k| ring[(start + k) % len]).collect()
 }
 
 fn marker_style(kind: ChangeKind) -> (char, Color) {

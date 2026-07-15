@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortField {
@@ -190,11 +190,23 @@ pub struct App {
 
     /// Follow-latest: jump to files as they change on disk.
     pub follow: bool,
+    /// Persisted auto-update preference (carried through for `save_config`).
+    auto_update: bool,
+    /// Set when a background update has been installed (shown in the footer).
+    pub update_ready: bool,
     /// Paths changed on disk that the user hasn't looked at yet.
     pub recently_changed: HashSet<String>,
     /// Last-seen mtime per path, to tell real content changes from the
     /// filesystem noise our own reads generate (atime/attrib events).
     last_mtimes: HashMap<String, SystemTime>,
+
+    // --- marquee (scrolling the selected file's long name) -----------------
+    /// Set by the renderer when the selected file's name overflows its column.
+    pub active_path_overflow: bool,
+    pub marquee_offset: usize,
+    /// Selection the marquee is tracking, to reset the scroll on change.
+    pub marquee_sel: usize,
+    marquee_last: Option<Instant>,
 
     pub show_help: bool,
     pub status: String,
@@ -236,8 +248,14 @@ impl App {
             sel_autoscroll: 0,
             pending_copy: None,
             follow: config.follow,
+            auto_update: config.auto_update,
+            update_ready: false,
             recently_changed: HashSet::new(),
             last_mtimes: HashMap::new(),
+            active_path_overflow: false,
+            marquee_offset: 0,
+            marquee_sel: 0,
+            marquee_last: None,
             show_help: false,
             status: String::new(),
             should_quit: false,
@@ -340,8 +358,37 @@ impl App {
             diff_mode: self.diff_mode,
             split_pct: self.split_pct,
             follow: self.follow,
+            auto_update: self.auto_update,
         }
         .save();
+    }
+
+    /// Note that a background update has been installed.
+    pub fn set_update_ready(&mut self, msg: String) {
+        self.update_ready = true;
+        self.status = msg;
+    }
+
+    /// Restart the marquee scroll (called when the selection changes).
+    pub fn marquee_reset(&mut self) {
+        self.marquee_offset = 0;
+        self.marquee_last = None;
+    }
+
+    /// Advance the marquee on a fixed timer. Returns whether it moved (so the
+    /// event loop knows to redraw). Only meaningful while a long name is selected.
+    pub fn marquee_step(&mut self) -> bool {
+        let now = Instant::now();
+        let due = self
+            .marquee_last
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_millis(220));
+        if due {
+            self.marquee_offset = self.marquee_offset.wrapping_add(1);
+            self.marquee_last = Some(now);
+            true
+        } else {
+            false
+        }
     }
 
     /// React to a change signal: reload, then figure out which files really

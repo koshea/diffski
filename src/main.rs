@@ -9,6 +9,7 @@ mod config;
 mod delta;
 mod git;
 mod ui;
+mod update;
 mod watch;
 
 use anyhow::{Context, Result};
@@ -40,6 +41,10 @@ struct Cli {
     /// List the available delta syntax themes and exit.
     #[arg(long)]
     list_themes: bool,
+
+    /// Don't check for updates on startup (this run only).
+    #[arg(long)]
+    no_update: bool,
 }
 
 fn main() -> Result<()> {
@@ -60,6 +65,10 @@ fn main() -> Result<()> {
         config.theme = cli.theme;
     }
 
+    // Background self-update (rate-limited, opt-out). Sends a note when done.
+    let (utx, urx) = mpsc::channel::<String>();
+    update::spawn_check(config.auto_update && !cli.no_update, utx);
+
     // Change detection runs on a background thread and signals over this channel.
     // `_watcher` must stay alive for the duration of the run.
     let (tx, rx) = mpsc::channel();
@@ -78,7 +87,7 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     let mouse_on = execute!(io::stdout(), EnableMouseCapture).is_ok();
-    let result = run(&mut terminal, &mut app, rx);
+    let result = run(&mut terminal, &mut app, rx, urx);
     if mouse_on {
         let _ = execute!(io::stdout(), DisableMouseCapture);
     }
@@ -127,6 +136,7 @@ fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     rx: mpsc::Receiver<watch::WatchEvent>,
+    urx: mpsc::Receiver<String>,
 ) -> Result<()> {
     let mut dirty = true;
     loop {
@@ -186,6 +196,17 @@ fn run(
         }
         if changed {
             app.on_fs_change();
+            dirty = true;
+        }
+
+        // A background update finished?
+        if let Ok(msg) = urx.try_recv() {
+            app.set_update_ready(msg);
+            dirty = true;
+        }
+
+        // Scroll the selected file's name if it's too long for its column.
+        if app.active_path_overflow && app.marquee_step() {
             dirty = true;
         }
 
