@@ -40,6 +40,14 @@ Two modes, toggled with `b`:
 
 Deletions and renames show up in both. `.gitignore` is honored.
 
+As the agent works, diffski keeps you oriented without getting noisy:
+
+- The file-list title shows a **changeset summary** — `N files · +added -removed`.
+- Files the agent touches that you **haven't looked at yet** get a small `●`; it
+  clears once you view them.
+- **Follow-latest** (`f`) jumps the view to each file as it changes, so review
+  tracks the agent live. Off by default; it never fights manual navigation.
+
 ## Requirements
 
 - **[delta](https://github.com/dandavison/delta)** must be installed and on your
@@ -86,6 +94,7 @@ as the agent works (filesystem writes are debounced ~150 ms).
 | `r` | reverse sort direction |
 | `t` / `T` | cycle syntax theme forward / back |
 | `b` | toggle diff mode: working changes ⇄ vs base branch |
+| `f` | follow-latest: jump to files as the agent changes them |
 | `y` | copy the current text selection |
 | `/` | search filenames (type to filter; `Enter` accepts, `Esc` clears) |
 | `?` | show the help overlay |

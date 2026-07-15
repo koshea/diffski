@@ -13,6 +13,8 @@ pub struct Config {
     pub diff_mode: DiffMode,
     /// Left (file-list) pane width as a percentage of the terminal.
     pub split_pct: u16,
+    /// Follow-latest: jump the view to files as they change on disk.
+    pub follow: bool,
 }
 
 impl Default for Config {
@@ -23,6 +25,7 @@ impl Default for Config {
             theme: None,
             diff_mode: DiffMode::Working,
             split_pct: 30,
+            follow: false,
         }
     }
 }
@@ -60,6 +63,7 @@ impl Config {
                         cfg.split_pct = v.clamp(15, 85);
                     }
                 }
+                "follow" => cfg.follow = value == "true",
                 _ => {}
             }
         }
@@ -76,12 +80,13 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         let body = format!(
-            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\n",
+            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\n",
             self.sort_field.as_key(),
             self.sort_desc,
             self.theme.as_deref().unwrap_or(""),
             self.diff_mode.as_key(),
             self.split_pct,
+            self.follow,
         );
         let _ = std::fs::write(&path, body);
     }

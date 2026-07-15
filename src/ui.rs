@@ -46,6 +46,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
+    // The file you're looking at is no longer "recently changed".
+    if let Some(path) = app.current_entry().map(|e| e.path.clone()) {
+        app.mark_viewed(&path);
+    }
+
+    let (mut total_add, mut total_del) = (0u32, 0u32);
     let items: Vec<ListItem> = app
         .filtered
         .iter()
@@ -58,23 +64,47 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
             ];
             // Per-file +/- line counts.
             if let Some(a) = entry.added.filter(|&a| a > 0) {
+                total_add += a;
                 spans.push(Span::styled(
                     format!(" +{a}"),
                     Style::default().fg(Color::Green),
                 ));
             }
             if let Some(d) = entry.removed.filter(|&d| d > 0) {
+                total_del += d;
                 spans.push(Span::styled(
                     format!(" -{d}"),
                     Style::default().fg(Color::Red),
                 ));
             }
+            // Cue for files changed on disk that you haven't looked at yet.
+            if app.recently_changed.contains(&entry.path) {
+                spans.push(Span::styled(" ●", Style::default().fg(Color::Cyan)));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect();
 
+    // Changeset summary in the panel title: N files · +added -removed.
+    let mut title = vec![Span::raw(format!(
+        " changed files ({}) ",
+        app.filtered.len()
+    ))];
+    if total_add > 0 {
+        title.push(Span::styled(
+            format!("+{total_add} "),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    if total_del > 0 {
+        title.push(Span::styled(
+            format!("-{total_del} "),
+            Style::default().fg(Color::Red),
+        ));
+    }
+
     let list = List::new(items)
-        .block(panel(format!(" changed files ({}) ", app.filtered.len())))
+        .block(panel(Line::from(title)))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         .highlight_symbol("▶ ");
 
@@ -160,15 +190,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Green),
         )),
         Mode::Normal => {
+            let follow = if app.follow { "  ·  follow" } else { "" };
             let info = format!(
-                "diff: {}  ·  sort: {} {}",
+                "diff: {}  ·  sort: {} {}{}",
                 app.base_label,
                 app.sort_field.label(),
                 if app.sort_desc { "▼" } else { "▲" },
+                follow,
             );
             Line::from(vec![
                 Span::styled(
-                    "↑/↓ file  scroll  s sort  r rev  t theme  b base  / search  ? help  q quit",
+                    "↑/↓ file  scroll  s sort  r rev  t theme  b base  f follow  ? help  q quit",
                     dim,
                 ),
                 Span::raw("   "),
@@ -192,6 +224,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("s / r", "sort field / reverse direction"),
         ("t / T", "cycle syntax theme forward / back"),
         ("b", "toggle working ⇄ base-branch diff"),
+        ("f", "follow — jump to files as they change"),
         ("/", "search filenames"),
         ("q / Esc", "quit"),
     ];

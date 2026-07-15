@@ -15,10 +15,11 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::ListState;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortField {
@@ -184,6 +185,14 @@ pub struct App {
     /// Text queued to be copied to the clipboard by the event loop.
     pub pending_copy: Option<String>,
 
+    /// Follow-latest: jump to files as they change on disk.
+    pub follow: bool,
+    /// Paths changed on disk that the user hasn't looked at yet.
+    pub recently_changed: HashSet<String>,
+    /// Last-seen mtime per path, to tell real content changes from the
+    /// filesystem noise our own reads generate (atime/attrib events).
+    last_mtimes: HashMap<String, SystemTime>,
+
     pub show_help: bool,
     pub status: String,
     pub should_quit: bool,
@@ -222,11 +231,21 @@ impl App {
             selection: None,
             selecting: false,
             pending_copy: None,
+            follow: config.follow,
+            recently_changed: HashSet::new(),
+            last_mtimes: HashMap::new(),
             show_help: false,
             status: String::new(),
             should_quit: false,
         };
         app.refresh();
+        // Prime mtimes from the initial changeset so nothing is flagged as
+        // "recently changed" at startup.
+        app.last_mtimes = app
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.mtime))
+            .collect();
         app
     }
 
@@ -316,20 +335,65 @@ impl App {
             theme: self.theme.clone(),
             diff_mode: self.diff_mode,
             split_pct: self.split_pct,
+            follow: self.follow,
         }
         .save();
     }
 
-    /// React to filesystem changes: drop stale cache entries for the changed
-    /// paths, then reload the file list.
-    pub fn on_fs_change(&mut self, paths: Vec<PathBuf>) {
-        for p in &paths {
-            if let Ok(rel) = p.strip_prefix(&self.root) {
-                self.cache
-                    .invalidate_path(&rel.to_string_lossy().replace('\\', "/"));
-            }
-        }
+    /// React to filesystem changes: reload, then figure out which files really
+    /// changed (by mtime) — the raw watcher fires on our own reads too, so we
+    /// can't trust the event paths for the cue / follow-latest.
+    pub fn on_fs_change(&mut self, _paths: Vec<PathBuf>) {
         self.refresh();
+
+        // Detect genuine content changes via mtime, and refresh the baseline.
+        let changed: Vec<String> = self
+            .files
+            .iter()
+            .filter(|f| self.last_mtimes.get(&f.path).is_none_or(|&t| f.mtime > t))
+            .map(|f| f.path.clone())
+            .collect();
+        self.last_mtimes = self
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.mtime))
+            .collect();
+
+        for p in &changed {
+            self.cache.invalidate_path(p);
+            self.recently_changed.insert(p.clone());
+        }
+        // Forget cues for paths no longer in the changeset.
+        self.recently_changed
+            .retain(|p| self.files.iter().any(|f| &f.path == p));
+
+        // Follow-latest: jump to the most recently modified changed file.
+        if self.follow
+            && let Some(target) = self
+                .files
+                .iter()
+                .filter(|f| changed.contains(&f.path))
+                .max_by_key(|f| f.mtime)
+                .map(|f| f.path.clone())
+        {
+            self.restore_anchor = Some((target, 0));
+        }
+    }
+
+    /// Toggle follow-latest mode.
+    pub fn toggle_follow(&mut self) {
+        self.follow = !self.follow;
+        self.status = if self.follow {
+            "follow: on".into()
+        } else {
+            "follow: off".into()
+        };
+        self.save_config();
+    }
+
+    /// Mark the file at `path` as viewed, clearing its recently-changed cue.
+    pub fn mark_viewed(&mut self, path: &str) {
+        self.recently_changed.remove(path);
     }
 
     // --- building the combined diff ----------------------------------------
@@ -827,6 +891,7 @@ impl App {
             KeyCode::Char('t') => self.cycle_theme(1),
             KeyCode::Char('T') => self.cycle_theme(-1),
             KeyCode::Char('b') => self.toggle_diff_mode(),
+            KeyCode::Char('f') => self.toggle_follow(),
             KeyCode::Char('y') => self.copy_selection(),
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('/') => {
