@@ -107,9 +107,10 @@ diffski captures the mouse, so:
 - **Wheel** scrolls the diff (over the file list, it moves between files).
 - **Click** a file to jump to it, or click in the diff to place the cursor.
 - **Drag in the diff** to select text — just the diff content, no borders or the
-  file column. The selection is copied to your clipboard on release (via OSC 52,
-  which works locally and over SSH; in tmux, enable `set-clipboard on`). Press
-  `y` to copy again.
+  file column. Drag past the top or bottom edge to auto-scroll and keep
+  selecting beyond the visible area. The selection is copied to your clipboard on
+  release (via OSC 52, which works locally and over SSH; in tmux, enable
+  `set-clipboard on`). Press `y` to copy again.
 - **Drag the divider** between the panes to resize them; the width is remembered.
 
 A live scrollbar on the diff shows your position in the whole changeset.

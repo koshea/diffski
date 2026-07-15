@@ -182,6 +182,9 @@ pub struct App {
     /// Active text selection in the diff pane, if any.
     pub selection: Option<Selection>,
     selecting: bool,
+    /// Auto-scroll direction while dragging a selection past an edge:
+    /// -1 up, +1 down, 0 none.
+    sel_autoscroll: i32,
     /// Text queued to be copied to the clipboard by the event loop.
     pub pending_copy: Option<String>,
 
@@ -230,6 +233,7 @@ impl App {
             dragging_divider: false,
             selection: None,
             selecting: false,
+            sel_autoscroll: 0,
             pending_copy: None,
             follow: config.follow,
             recently_changed: HashSet::new(),
@@ -762,6 +766,7 @@ impl App {
                     self.save_config();
                 } else if self.selecting {
                     self.selecting = false;
+                    self.sel_autoscroll = 0;
                     self.copy_selection();
                 }
             }
@@ -825,13 +830,61 @@ impl App {
             cursor: pos,
         });
         self.selecting = true;
+        self.sel_autoscroll = 0;
         self.selected = self.file_at_line(pos.0);
     }
 
     fn update_selection(&mut self, col: u16, row: u16) {
-        let pos = self.diff_cell(col, row);
-        if let Some(sel) = &mut self.selection {
-            sel.cursor = pos;
+        let top = self.area_right.y + 1;
+        // Last content row (inside the bottom border).
+        let bottom = self.area_right.y + self.area_right.height.saturating_sub(2);
+        if row < top {
+            self.sel_autoscroll = -1;
+            self.selection_autoscroll_tick();
+        } else if row > bottom {
+            self.sel_autoscroll = 1;
+            self.selection_autoscroll_tick();
+        } else {
+            self.sel_autoscroll = 0;
+            let pos = self.diff_cell(col, row);
+            if let Some(sel) = &mut self.selection {
+                sel.cursor = pos;
+            }
+        }
+    }
+
+    /// True while a selection drag is auto-scrolling past a pane edge.
+    pub fn is_autoscrolling(&self) -> bool {
+        self.selecting && self.sel_autoscroll != 0
+    }
+
+    /// Advance an in-progress edge auto-scroll by one step, extending the
+    /// selection to the new top/bottom line. Returns whether it scrolled.
+    pub fn selection_autoscroll_tick(&mut self) -> bool {
+        if !self.is_autoscrolling() {
+            return false;
+        }
+        const STEP: u16 = 3;
+        if self.sel_autoscroll < 0 {
+            let before = self.diff_scroll;
+            self.diff_scroll = self.diff_scroll.saturating_sub(STEP);
+            if let Some(sel) = &mut self.selection {
+                sel.cursor = (self.diff_scroll as usize, 0);
+            }
+            self.update_selected_from_scroll();
+            self.diff_scroll != before
+        } else {
+            let before = self.diff_scroll;
+            self.diff_scroll = (self.diff_scroll + STEP).min(self.max_scroll());
+            // Extend to the bottom visible line; usize::MAX = end of line (clamped later).
+            let bottom_line = (self.diff_scroll as usize
+                + self.diff_viewport_height.saturating_sub(1) as usize)
+                .min(self.combined.lines.len().saturating_sub(1));
+            if let Some(sel) = &mut self.selection {
+                sel.cursor = (bottom_line, usize::MAX);
+            }
+            self.update_selected_from_scroll();
+            self.diff_scroll != before
         }
     }
 

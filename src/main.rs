@@ -146,8 +146,14 @@ fn run(
             continue;
         }
 
-        // Block for input, but wake ~10x/sec to drain the filesystem channel.
-        if event::poll(Duration::from_millis(100))? {
+        // Block for input, but wake periodically to poll for changes. While a
+        // selection is auto-scrolling past an edge, tick faster for smoothness.
+        let timeout = if app.is_autoscrolling() {
+            Duration::from_millis(30)
+        } else {
+            Duration::from_millis(100)
+        };
+        if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
@@ -160,6 +166,12 @@ fn run(
                 Event::Resize(_, _) => dirty = true,
                 _ => {}
             }
+        }
+
+        // Continue auto-scrolling a selection while the pointer is held past an
+        // edge (crossterm sends no events while the mouse is stationary).
+        if app.selection_autoscroll_tick() {
+            dirty = true;
         }
 
         // Emit any queued clipboard copy (from a text selection).

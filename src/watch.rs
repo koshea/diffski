@@ -15,9 +15,12 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// Baseline poll cadence. We never poll more often than ~3× the time a poll
-/// takes, so on a repo where `git status` is slow we back off automatically.
-const POLL_INTERVAL: Duration = Duration::from_millis(600);
+/// Poll cadence. Fast while changes are actively happening, backing off toward
+/// `POLL_IDLE` when nothing changes, so an idle diffski uses little CPU. We also
+/// never poll more often than ~3× the time a poll takes, so on a repo where
+/// `git status` is slow we throttle automatically.
+const POLL_ACTIVE: Duration = Duration::from_millis(500);
+const POLL_IDLE: Duration = Duration::from_millis(3000);
 
 /// A change signal. Carries no payload — the app recomputes what changed itself.
 pub type WatchEvent = ();
@@ -32,20 +35,24 @@ pub fn watch(root: &Path, tx: Sender<WatchEvent>) -> Result<Watcher> {
     let root = root.to_path_buf();
     let handle = thread::spawn(move || {
         let mut prev: Option<String> = None;
+        let mut interval = POLL_ACTIVE;
         loop {
             let started = Instant::now();
             let sig = change_signature(&root);
-            // Signal on a real change; a send error means the app exited.
-            if let Some(p) = &prev
-                && *p != sig
-                && tx.send(()).is_err()
-            {
-                break;
+            let changed = prev.as_ref().is_some_and(|p| *p != sig);
+            if changed && tx.send(()).is_err() {
+                break; // receiver gone -> app is shutting down
             }
             prev = Some(sig);
 
+            // Poll fast right after a change, back off toward idle otherwise.
+            interval = if changed {
+                POLL_ACTIVE
+            } else {
+                (interval.mul_f32(1.5)).min(POLL_IDLE)
+            };
             let elapsed = started.elapsed();
-            thread::sleep(POLL_INTERVAL.max(elapsed.saturating_mul(3)));
+            thread::sleep(interval.max(elapsed.saturating_mul(3)));
         }
     });
     Ok(Watcher { _handle: handle })
