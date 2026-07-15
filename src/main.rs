@@ -60,10 +60,10 @@ fn main() -> Result<()> {
         config.theme = cli.theme;
     }
 
-    // Filesystem watcher -> channel drained by the event loop. `_watcher` must
-    // stay alive for the duration of the run.
+    // Change detection runs on a background thread and signals over this channel.
+    // `_watcher` must stay alive for the duration of the run.
     let (tx, rx) = mpsc::channel();
-    let _watcher = watch::watch(&root, tx).context("failed to start filesystem watcher")?;
+    let _watcher = watch::watch(&root, tx).context("failed to start change watcher")?;
 
     let mut app = App::new(root, config);
 
@@ -167,13 +167,13 @@ fn run(
             copy_to_clipboard(&text);
         }
 
-        // Coalesce all pending filesystem changes into one refresh.
-        let mut changed = Vec::new();
-        while let Ok(paths) = rx.try_recv() {
-            changed.extend(paths);
+        // Coalesce any pending change signals into one refresh.
+        let mut changed = false;
+        while rx.try_recv().is_ok() {
+            changed = true;
         }
-        if !changed.is_empty() {
-            app.on_fs_change(changed);
+        if changed {
+            app.on_fs_change();
             dirty = true;
         }
 

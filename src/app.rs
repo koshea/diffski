@@ -340,10 +340,9 @@ impl App {
         .save();
     }
 
-    /// React to filesystem changes: reload, then figure out which files really
-    /// changed (by mtime) — the raw watcher fires on our own reads too, so we
-    /// can't trust the event paths for the cue / follow-latest.
-    pub fn on_fs_change(&mut self, _paths: Vec<PathBuf>) {
+    /// React to a change signal: reload, then figure out which files really
+    /// changed (by mtime) for the recently-changed cue and follow-latest.
+    pub fn on_fs_change(&mut self) {
         self.refresh();
 
         // Detect genuine content changes via mtime, and refresh the baseline.

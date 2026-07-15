@@ -81,7 +81,7 @@ diffski path/to/worktree
 ```
 
 Leave it running in a spare pane or on a second monitor; it updates on its own
-as the agent works (filesystem writes are debounced ~150 ms).
+as the agent works (it checks for changes a couple of times a second).
 
 ## Keys
 
@@ -148,7 +148,10 @@ opens the same way every time.
   rebuilding the combined view is otherwise just concatenation. Cold renders run
   in parallel across cores, and the file list paints before the diffs are built,
   so startup is fast even for large changesets.
-- **Live updates** come from a debounced recursive [`notify`](https://github.com/notify-rs/notify)
-  watcher; `git status` remains the source of truth for what changed.
+- **Live updates** come from polling `git status` on a background thread rather
+  than a filesystem watcher. `git status` stays fast (tens of ms) even on a
+  monorepo with over a million directories, where a recursive inotify watch
+  would be slow and blow past the OS watch limit. The poll also folds in the
+  mtimes of changed files, so re-editing an already-changed file is detected.
 
 Built with [ratatui](https://ratatui.rs).

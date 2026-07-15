@@ -12,7 +12,7 @@ readme = "README.md"
 ansi-to-tui = "8.0.1"
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
-notify-debouncer-mini = "0.7.0"
 # crossterm is used via ratatui's re-export (ratatui::crossterm) to guarantee a
-# single, matching version; notify is used via notify-debouncer-mini::notify.
+# single, matching version. Change detection polls `git status` (see watch.rs),
+# so there's no filesystem-watcher dependency.
 ratatui = "0.30.2"

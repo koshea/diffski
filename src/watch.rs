@@ -1,58 +1,83 @@
-//! Filesystem watching. A recursive, debounced `notify` watcher on the repo
-//! root forwards the set of changed paths into the event loop over an mpsc
-//! channel. `git status` remains the source of truth for *what* changed; these
-//! events just tell the app *when* to refresh and which cache entries to drop.
+//! Change detection by polling `git status` on a background thread.
+//!
+//! We poll rather than use an inotify-style recursive watcher: a large monorepo
+//! can have well over a million directories, which is slow to watch and blows
+//! past the OS watch limit. `git status` stays fast (tens of milliseconds) at
+//! any repo size and honors `.gitignore` for free, so it's both cheaper and
+//! more robust. The signature also folds in the mtimes of changed files, so an
+//! edit to an already-modified file (whose status line is unchanged) is caught.
 
-use anyhow::{Context, Result};
-use notify_debouncer_mini::notify::RecursiveMode;
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
-use std::path::{Component, Path, PathBuf};
+use anyhow::Result;
+use std::fmt::Write as _;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// Coalesce a burst of writes (e.g. an agent saving many files) into one refresh.
-const DEBOUNCE: Duration = Duration::from_millis(150);
+/// Baseline poll cadence. We never poll more often than ~3× the time a poll
+/// takes, so on a repo where `git status` is slow we back off automatically.
+const POLL_INTERVAL: Duration = Duration::from_millis(600);
 
-/// A change event: the absolute paths that changed since the last debounce tick,
-/// with anything under `.git/` already filtered out.
-pub type WatchEvent = Vec<PathBuf>;
+/// A change signal. Carries no payload — the app recomputes what changed itself.
+pub type WatchEvent = ();
 
-/// Owns the running watcher. Dropping it stops watching, so the caller must keep
-/// it alive for as long as updates are wanted.
+/// Owns the polling thread. The thread stops on its own when `tx`'s receiver is
+/// dropped (i.e. the app is exiting), so there's nothing to join explicitly.
 pub struct Watcher {
-    _debouncer: Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>,
+    _handle: thread::JoinHandle<()>,
 }
 
-/// Start watching `root` recursively. Changed paths are sent on `tx`.
 pub fn watch(root: &Path, tx: Sender<WatchEvent>) -> Result<Watcher> {
-    let mut debouncer = new_debouncer(DEBOUNCE, move |res: DebounceEventResult| {
-        if let Ok(events) = res {
-            let paths: Vec<PathBuf> = events
-                .into_iter()
-                .map(|e| e.path)
-                .filter(|p| !is_git_internal(p))
-                .collect();
-            if !paths.is_empty() {
-                // If the receiver is gone the app is shutting down; ignore.
-                let _ = tx.send(paths);
+    let root = root.to_path_buf();
+    let handle = thread::spawn(move || {
+        let mut prev: Option<String> = None;
+        loop {
+            let started = Instant::now();
+            let sig = change_signature(&root);
+            // Signal on a real change; a send error means the app exited.
+            if let Some(p) = &prev
+                && *p != sig
+                && tx.send(()).is_err()
+            {
+                break;
             }
+            prev = Some(sig);
+
+            let elapsed = started.elapsed();
+            thread::sleep(POLL_INTERVAL.max(elapsed.saturating_mul(3)));
         }
-    })
-    .context("failed to create filesystem watcher")?;
-
-    debouncer
-        .watcher()
-        .watch(root, RecursiveMode::Recursive)
-        .with_context(|| format!("failed to watch {}", root.display()))?;
-
-    Ok(Watcher {
-        _debouncer: debouncer,
-    })
+    });
+    Ok(Watcher { _handle: handle })
 }
 
-/// True for paths inside a `.git` directory — git's own churn (index, refs,
-/// lock files) would otherwise cause a refresh storm during commits.
-fn is_git_internal(path: &Path) -> bool {
-    path.components()
-        .any(|c| matches!(c, Component::Normal(name) if name == ".git"))
+/// A cheap fingerprint of the working tree: `git status` output plus the mtimes
+/// of the files it lists. Changes whenever files are added/removed/renamed or an
+/// existing changed file is edited again.
+fn change_signature(root: &Path) -> String {
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .output()
+    else {
+        return String::new();
+    };
+    let status = String::from_utf8_lossy(&out.stdout);
+    let mut sig = status.to_string();
+
+    for tok in status.split('\0') {
+        // Status entries look like "XY path"; skip rename-origin path tokens and
+        // anything that isn't a proper entry. `get` avoids slicing panics.
+        if tok.as_bytes().get(2) != Some(&b' ') {
+            continue;
+        }
+        let Some(path) = tok.get(3..) else { continue };
+        if let Ok(m) = std::fs::metadata(root.join(path)).and_then(|md| md.modified())
+            && let Ok(d) = m.duration_since(UNIX_EPOCH)
+        {
+            let _ = write!(sig, "|{}:{}", path, d.as_nanos());
+        }
+    }
+    sig
 }
