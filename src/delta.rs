@@ -50,13 +50,16 @@ pub fn list_syntax_themes() -> Result<()> {
 ///
 /// `theme` overrides delta's syntax-highlighting theme (delta's
 /// `--syntax-theme`); when `None`, delta uses whatever your gitconfig specifies.
-pub fn render(raw: &[u8], width: u16, theme: Option<&str>) -> Result<Text<'static>> {
+/// `tabs` is the number of spaces a tab expands to.
+pub fn render(raw: &[u8], width: u16, theme: Option<&str>, tabs: u16) -> Result<Text<'static>> {
     // delta needs a sane width for its decorations/background fills.
     let width = width.max(20);
 
     let mut cmd = Command::new("delta");
     cmd.args(["--paging", "never", "--true-color", "always", "--width"])
-        .arg(width.to_string());
+        .arg(width.to_string())
+        .arg("--tabs")
+        .arg(tabs.to_string());
     if let Some(theme) = theme {
         cmd.args(["--syntax-theme", theme]);
     }
@@ -118,6 +121,7 @@ impl DiffCache {
         sig: u64,
         width: u16,
         theme: Option<&str>,
+        tabs: u16,
         produce_raw: F,
     ) -> Result<Text<'static>>
     where
@@ -128,7 +132,7 @@ impl DiffCache {
             return Ok(text.clone());
         }
         let raw = produce_raw()?;
-        let text = render(&raw, width, theme)?;
+        let text = render(&raw, width, theme, tabs)?;
         self.map.insert(key, text.clone());
         Ok(text)
     }

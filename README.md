@@ -128,6 +128,11 @@ diffski --list-themes      # see what's available
 With no `--theme`, diffski uses whatever your gitconfig `[delta] syntax-theme`
 specifies. The theme you pick with `t`/`--theme` is remembered (see below).
 
+## Tabs
+
+Tabs in the diff expand to 4 spaces by default. Change it with `--tabs N` (for a
+run) or `tab_width=N` in the config (persisted).
+
 ## Updating
 
 diffski keeps itself up to date. On startup (at most once a day, in the
@@ -145,9 +150,9 @@ cargo install --git https://github.com/koshea/diffski --force
 
 ## Remembered settings
 
-Your sort order, theme, diff mode, pane split, follow-latest, and auto-update
-preference are persisted to `$XDG_CONFIG_HOME/diffski/config` (default
-`~/.config/diffski/config`), so diffski opens the same way every time.
+Your sort order, theme, diff mode, pane split, follow-latest, tab width, and
+auto-update preference are persisted to `$XDG_CONFIG_HOME/diffski/config`
+(default `~/.config/diffski/config`), so diffski opens the same way every time.
 
 ## How it works
 

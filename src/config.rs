@@ -17,6 +17,8 @@ pub struct Config {
     pub follow: bool,
     /// Check for and install updates in the background on startup.
     pub auto_update: bool,
+    /// Number of spaces a tab expands to in the diff.
+    pub tab_width: u16,
 }
 
 impl Default for Config {
@@ -29,6 +31,7 @@ impl Default for Config {
             split_pct: 30,
             follow: false,
             auto_update: true,
+            tab_width: 4,
         }
     }
 }
@@ -68,6 +71,11 @@ impl Config {
                 }
                 "follow" => cfg.follow = value == "true",
                 "auto_update" => cfg.auto_update = value != "false",
+                "tab_width" => {
+                    if let Ok(v) = value.parse::<u16>() {
+                        cfg.tab_width = v.min(16);
+                    }
+                }
                 _ => {}
             }
         }
@@ -84,7 +92,7 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         let body = format!(
-            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\nauto_update={}\n",
+            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\nauto_update={}\ntab_width={}\n",
             self.sort_field.as_key(),
             self.sort_desc,
             self.theme.as_deref().unwrap_or(""),
@@ -92,6 +100,7 @@ impl Config {
             self.split_pct,
             self.follow,
             self.auto_update,
+            self.tab_width,
         );
         let _ = std::fs::write(&path, body);
     }

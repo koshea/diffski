@@ -131,6 +131,8 @@ pub struct App {
     base: String,
     /// delta syntax-theme override; `None` means "use gitconfig".
     theme: Option<String>,
+    /// Spaces a tab expands to in the diff.
+    tab_width: u16,
     /// What the diff is taken against.
     pub diff_mode: DiffMode,
     /// Human-readable label for the current base (e.g. "HEAD" or "origin/main").
@@ -219,6 +221,7 @@ impl App {
             root,
             base: String::new(),
             theme: config.theme,
+            tab_width: config.tab_width,
             diff_mode: config.diff_mode,
             base_label: String::new(),
             files: Vec::new(),
@@ -359,6 +362,7 @@ impl App {
             split_pct: self.split_pct,
             follow: self.follow,
             auto_update: self.auto_update,
+            tab_width: self.tab_width,
         }
         .save();
     }
@@ -489,6 +493,7 @@ impl App {
                 sig,
                 width,
                 self.theme.as_deref(),
+                self.tab_width,
                 move || git::raw_diff(&root, &e, &base),
             ) {
                 Ok(text) if text.lines.is_empty() => lines.push(Line::from("  (no textual diff)")),
@@ -547,6 +552,7 @@ impl App {
             .min(16);
 
         let theme = self.theme.clone();
+        let tabs = self.tab_width;
         let next = AtomicUsize::new(0);
         type Rendered = (String, u64, std::result::Result<Text<'static>, String>);
         let out: Mutex<Vec<Rendered>> = Mutex::new(Vec::new());
@@ -559,7 +565,7 @@ impl App {
                         let Some(entry) = cold.get(i) else { break };
                         let sig = signature(entry);
                         let rendered = git::raw_diff(root, entry, base)
-                            .and_then(|raw| delta::render(&raw, width, theme.as_deref()))
+                            .and_then(|raw| delta::render(&raw, width, theme.as_deref(), tabs))
                             .map_err(|e| e.to_string());
                         out.lock()
                             .unwrap()

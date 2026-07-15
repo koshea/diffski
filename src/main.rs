@@ -45,6 +45,10 @@ struct Cli {
     /// Don't check for updates on startup (this run only).
     #[arg(long)]
     no_update: bool,
+
+    /// Spaces a tab expands to in the diff (overrides the saved setting).
+    #[arg(long, value_name = "N")]
+    tabs: Option<u16>,
 }
 
 fn main() -> Result<()> {
@@ -63,6 +67,9 @@ fn main() -> Result<()> {
     let mut config = Config::load();
     if cli.theme.is_some() {
         config.theme = cli.theme;
+    }
+    if let Some(tabs) = cli.tabs {
+        config.tab_width = tabs.min(16);
     }
 
     // Background self-update (rate-limited, opt-out). Sends a note when done.
