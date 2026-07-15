@@ -13,7 +13,7 @@ highlighting, and your existing `[delta]` gitconfig for free.
 
 ```
 ┌ changed files (3) ─────────┐┌ M src/main.rs ─────────────────────────────┐
-│▶ M src/main.rs            ││src/main.rs                                 │
+│▶ M src/main.rs             ││src/main.rs                                 │
 │  M notes.txt               ││────────────────────────────────────────────│
 │  ? fresh.txt               ││ fn main() {                                │
 │                            ││-    let x = 1;                             │
