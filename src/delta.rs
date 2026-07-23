@@ -9,31 +9,31 @@
 //! color output deterministic regardless of the inherited environment.
 
 use ansi_to_tui::IntoText;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use ratatui::text::Text;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
-/// Verify the `delta` binary is available. Called once at startup so we can fail
-/// with a helpful message instead of erroring on the first diff.
+/// Probe whether `delta` is installed.
+///
+/// diffski can fall back to plain ANSI `git diff` output when delta is missing,
+/// so this is intentionally best-effort now.
 pub fn ensure_available() -> Result<()> {
-    Command::new("delta")
-        .arg("--version")
-        .output()
-        .map(|_| ())
-        .map_err(|_| {
-            anyhow!(
-                "`delta` was not found on PATH.\n\n\
-                 diffski renders diffs with delta (https://github.com/dandavison/delta).\n\
-                 Install it with `cargo install git-delta` or your system package manager."
-            )
-        })
+    let _ = is_available();
+    Ok(())
 }
 
 /// Print the syntax-highlighting themes delta knows about (its
 /// `--list-syntax-themes`), for `diffski --list-themes`.
 pub fn list_syntax_themes() -> Result<()> {
+    if !is_available() {
+        bail!(
+            "`delta` was not found on PATH.\n\
+             Install it with `cargo install git-delta` or your system package manager."
+        );
+    }
     let status = Command::new("delta")
         .arg("--list-syntax-themes")
         .status()
@@ -52,6 +52,12 @@ pub fn list_syntax_themes() -> Result<()> {
 /// `--syntax-theme`); when `None`, delta uses whatever your gitconfig specifies.
 /// `tabs` is the number of spaces a tab expands to.
 pub fn render(raw: &[u8], width: u16, theme: Option<&str>, tabs: u16) -> Result<Text<'static>> {
+    // Fall back to plain ANSI git diff output if delta isn't available. This
+    // keeps diffski usable even on minimal systems where delta isn't installed.
+    if !is_available() {
+        return raw.into_text().context("failed to parse git's ANSI output");
+    }
+
     // delta needs a sane width for its decorations/background fills.
     let width = width.max(20);
 
@@ -97,6 +103,17 @@ pub fn render(raw: &[u8], width: u16, theme: Option<&str>, tabs: u16) -> Result<
         .context("failed to parse delta's ANSI output")
 }
 
+pub fn is_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("delta")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
 /// Caches rendered diffs keyed by `(path, content signature, width)`.
 ///
 /// The signature (see [`crate::app`]) changes when a file's content changes, so
@@ -105,6 +122,9 @@ pub fn render(raw: &[u8], width: u16, theme: Option<&str>, tabs: u16) -> Result<
 #[derive(Default)]
 pub struct DiffCache {
     map: HashMap<(String, u64, u16), Text<'static>>,
+    /// ANSI-stripped raw diff text per (path, signature) — width- and
+    /// theme-independent, used by content search.
+    raw: HashMap<(String, u64), String>,
 }
 
 impl DiffCache {
@@ -132,6 +152,9 @@ impl DiffCache {
             return Ok(text.clone());
         }
         let raw = produce_raw()?;
+        self.raw
+            .entry((path.to_string(), sig))
+            .or_insert_with(|| crate::search::strip_ansi(&String::from_utf8_lossy(&raw)));
         let text = render(&raw, width, theme, tabs)?;
         self.map.insert(key, text.clone());
         Ok(text)
@@ -147,15 +170,46 @@ impl DiffCache {
         self.map.insert((path.to_string(), sig, width), text);
     }
 
+    /// The ANSI-stripped raw diff for `path` at `sig`, if retained.
+    pub fn raw_text(&self, path: &str, sig: u64) -> Option<&str> {
+        self.raw.get(&(path.to_string(), sig)).map(String::as_str)
+    }
+
+    /// Retain the ANSI-stripped raw diff for `path` at `sig`.
+    pub fn insert_raw(&mut self, path: &str, sig: u64, stripped: String) {
+        self.raw.insert((path.to_string(), sig), stripped);
+    }
+
     /// Drop all cached renders for a path (any signature/width). Called when the
     /// watcher reports a path changed, to bound memory over a long session.
     pub fn invalidate_path(&mut self, path: &str) {
         self.map.retain(|(p, _, _), _| p != path);
+        self.raw.retain(|(p, _), _| p != path);
     }
 
     /// Drop every cached render. Used when the theme changes, since the theme
     /// is not part of the cache key (it's fixed except when explicitly switched).
+    /// Raw text is intentionally kept: it's theme-independent, so a theme
+    /// switch shouldn't force content search to re-fetch and re-strip diffs.
     pub fn clear(&mut self) {
         self.map.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiffCache;
+
+    #[test]
+    fn raw_text_round_trip_and_invalidation() {
+        let mut cache = DiffCache::new();
+        assert_eq!(cache.raw_text("a.rs", 1), None);
+        cache.insert_raw("a.rs", 1, "+added".to_string());
+        assert_eq!(cache.raw_text("a.rs", 1), Some("+added"));
+        assert_eq!(cache.raw_text("a.rs", 2), None); // signature mismatch
+        cache.clear(); // theme change: raw text survives
+        assert_eq!(cache.raw_text("a.rs", 1), Some("+added"));
+        cache.invalidate_path("a.rs"); // file change: raw text dropped
+        assert_eq!(cache.raw_text("a.rs", 1), None);
     }
 }

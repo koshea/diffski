@@ -19,6 +19,8 @@ pub struct Config {
     pub auto_update: bool,
     /// Number of spaces a tab expands to in the diff.
     pub tab_width: u16,
+    /// Hide the file-list sidebar (toggled with Tab).
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for Config {
@@ -32,6 +34,7 @@ impl Default for Config {
             follow: false,
             auto_update: true,
             tab_width: 4,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -76,6 +79,7 @@ impl Config {
                         cfg.tab_width = v.min(16);
                     }
                 }
+                "sidebar_collapsed" => cfg.sidebar_collapsed = value == "true",
                 _ => {}
             }
         }
@@ -92,7 +96,7 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         let body = format!(
-            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\nauto_update={}\ntab_width={}\n",
+            "sort_field={}\nsort_desc={}\ntheme={}\ndiff_mode={}\nsplit_pct={}\nfollow={}\nauto_update={}\ntab_width={}\nsidebar_collapsed={}\n",
             self.sort_field.as_key(),
             self.sort_desc,
             self.theme.as_deref().unwrap_or(""),
@@ -101,6 +105,7 @@ impl Config {
             self.follow,
             self.auto_update,
             self.tab_width,
+            self.sidebar_collapsed,
         );
         let _ = std::fs::write(&path, body);
     }

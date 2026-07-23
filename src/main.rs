@@ -7,7 +7,9 @@
 mod app;
 mod config;
 mod delta;
+mod filter;
 mod git;
+mod search;
 mod ui;
 mod update;
 mod watch;
@@ -24,7 +26,7 @@ use ratatui::crossterm::execute;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Live diff TUI for reviewing changes as a coding agent works.
 #[derive(Parser)]
@@ -82,6 +84,9 @@ fn main() -> Result<()> {
     let _watcher = watch::watch(&root, tx).context("failed to start change watcher")?;
 
     let mut app = App::new(root, config);
+    if !delta::is_available() {
+        app.set_status("delta not found — using plain git diff fallback");
+    }
 
     // `ratatui::init()` installs a panic hook that restores the terminal, but it
     // doesn't know about mouse capture — chain a hook that disables it too, so a
@@ -139,12 +144,25 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+/// Recompute "commits behind the base branch" off the UI thread — a fetch can
+/// move the base ref without any working-tree change, so this also runs on a
+/// slow timer, not just on change signals.
+fn spawn_behind_check(root: PathBuf, tx: mpsc::Sender<Option<u64>>) {
+    std::thread::spawn(move || {
+        let n = git::base_branch(&root).and_then(|b| git::behind_count(&root, &b));
+        let _ = tx.send(n);
+    });
+}
+
 fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     rx: mpsc::Receiver<watch::WatchEvent>,
     urx: mpsc::Receiver<String>,
 ) -> Result<()> {
+    let (btx, brx) = mpsc::channel::<Option<u64>>();
+    let mut behind_inflight = false;
+    let mut behind_last = Instant::now();
     let mut dirty = true;
     loop {
         if dirty {
@@ -177,8 +195,9 @@ fn run(
                     dirty = true;
                 }
                 Event::Mouse(m) => {
-                    app.handle_mouse(m);
-                    dirty = true;
+                    if app.handle_mouse(m) {
+                        dirty = true;
+                    }
                 }
                 Event::Resize(_, _) => dirty = true,
                 _ => {}
@@ -212,8 +231,31 @@ fn run(
             dirty = true;
         }
 
+        // Refresh the "behind base" count when flagged, or every ~60s to catch
+        // fetches that moved the base ref without touching the working tree.
+        // One check in flight at a time, so a slow git can't stack threads.
+        if (app.behind_dirty || behind_last.elapsed() > Duration::from_secs(60)) && !behind_inflight
+        {
+            app.behind_dirty = false;
+            behind_last = Instant::now();
+            behind_inflight = true;
+            spawn_behind_check(app.root.clone(), btx.clone());
+        }
+        if let Ok(n) = brx.try_recv() {
+            behind_inflight = false;
+            if app.behind != n {
+                app.behind = n;
+                dirty = true;
+            }
+        }
+
         // Scroll the selected file's name if it's too long for its column.
         if app.active_path_overflow && app.marquee_step() {
+            dirty = true;
+        }
+
+        // Let transient status messages expire so the info footer returns.
+        if app.status_tick() {
             dirty = true;
         }
 

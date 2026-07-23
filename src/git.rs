@@ -4,7 +4,7 @@
 //! Everything shells out to `git` so behavior matches the user's own git config.
 
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -13,7 +13,7 @@ use std::time::SystemTime;
 /// yet (no `HEAD`), so staged/tracked files still render as fully added.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChangeKind {
     Modified,
     Added,
@@ -30,10 +30,21 @@ impl ChangeKind {
             ChangeKind::Added => 'A',
             ChangeKind::Deleted => 'D',
             ChangeKind::Renamed => 'R',
-            ChangeKind::Untracked => '?',
+            ChangeKind::Untracked => 'U',
         }
     }
 }
+
+/// Canonical order the five change kinds are always shown in — chips,
+/// footer pills, and the kind-filter keyboard mode all share this order so
+/// rendering and click hit-testing can never drift out of sync.
+pub const KIND_ORDER: [ChangeKind; 5] = [
+    ChangeKind::Added,
+    ChangeKind::Modified,
+    ChangeKind::Deleted,
+    ChangeKind::Renamed,
+    ChangeKind::Untracked,
+];
 
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -262,6 +273,21 @@ pub fn merge_base(root: &Path, base_branch: &str) -> Option<String> {
     (!sha.is_empty()).then_some(sha)
 }
 
+/// How many commits `HEAD` is behind `base` (commits reachable from `base` but
+/// not from `HEAD`). `None` when the count can't be determined.
+pub fn behind_count(root: &Path, base: &str) -> Option<u64> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--count", &format!("HEAD..{base}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 /// Files that differ between `base` (a commit) and the current working tree —
 /// committed *and* uncommitted tracked changes — plus untracked files. This is
 /// the file list for base-branch mode.
@@ -393,4 +419,299 @@ pub fn raw_diff(root: &Path, entry: &FileEntry, base: &str) -> Result<Vec<u8>> {
     }
 
     Ok(out.stdout)
+}
+
+/// One commit in a file's history, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    /// Full commit id.
+    pub hash: String,
+    /// Abbreviated commit id, as `git log --format=%h` produced it.
+    pub short_hash: String,
+    /// Commit subject line.
+    pub subject: String,
+    /// The path the file had at that commit (differs across renames).
+    pub path_at_commit: String,
+    /// True when the commit is not one of the current branch's own commits.
+    pub pre_branch: bool,
+}
+
+/// Parse `git log --follow --format=%x01%H%x1f%h%x1f%s --name-only` output
+/// into `(hash, short_hash, subject, path_at_commit)` tuples. Records start
+/// at `\x01`; the head line holds hash/short/subject separated by `\x1f`, and
+/// the first non-empty line after it is the file's name at that commit.
+fn parse_file_history(out: &str) -> Vec<(String, String, String, String)> {
+    let mut entries = Vec::new();
+    for record in out.split('\u{1}').skip(1) {
+        let mut lines = record.lines();
+        let Some(head) = lines.next() else { continue };
+        let mut parts = head.splitn(3, '\u{1f}');
+        let (Some(hash), Some(short), Some(subject)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Some(path) = lines.find(|l| !l.is_empty()) else {
+            continue;
+        };
+        entries.push((
+            hash.to_string(),
+            short.to_string(),
+            subject.to_string(),
+            path.to_string(),
+        ));
+    }
+    entries
+}
+
+/// Commits that belong to the current branch: reachable from `HEAD` but not
+/// from the merge base with the base branch. Empty when there is no base
+/// branch, no merge base, or `HEAD` *is* the merge base (sitting on the base
+/// branch itself) — callers treat "empty" as "suppress the pre-branch pill",
+/// since flagging every commit would be noise, not signal.
+pub fn branch_commits(root: &Path) -> HashSet<String> {
+    let Some(bb) = base_branch(root) else {
+        return HashSet::new();
+    };
+    let Some(mb) = merge_base(root, &bb) else {
+        return HashSet::new();
+    };
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", &format!("{mb}..HEAD")])
+        .output()
+    else {
+        return HashSet::new();
+    };
+    if !out.status.success() {
+        return HashSet::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// The commits that touched `path`, newest first, following renames.
+/// `branch` is [`branch_commits`]' output; when empty, no entry is flagged
+/// `pre_branch`.
+pub fn file_history(
+    root: &Path,
+    path: &str,
+    branch: &HashSet<String>,
+) -> Result<Vec<HistoryEntry>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        // quotepath=off keeps non-ASCII paths literal instead of escaped.
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "log",
+            "--follow",
+            "--format=%x01%H%x1f%h%x1f%s",
+            "--name-only",
+            "--",
+            path,
+        ])
+        .output()
+        .context("failed to run `git log --follow`")?;
+    if !out.status.success() {
+        bail!(
+            "`git log --follow` failed for {path}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let suppress = branch.is_empty();
+    Ok(parse_file_history(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .map(|(hash, short_hash, subject, path_at_commit)| HistoryEntry {
+            pre_branch: !suppress && !branch.contains(&hash),
+            hash,
+            short_hash,
+            subject,
+            path_at_commit,
+        })
+        .collect())
+}
+
+/// The raw, ANSI-colored diff a single commit made to `path` (the file's name
+/// at that commit). Root commits have no parent and diff against the empty
+/// tree, so the file renders as fully added.
+pub fn commit_diff(root: &Path, commit: &str, path: &str) -> Result<Vec<u8>> {
+    let parent = format!("{commit}^");
+    let has_parent = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "--quiet", &parent])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let base = if has_parent {
+        parent
+    } else {
+        EMPTY_TREE.to_string()
+    };
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--color=always", &base, commit, "--"])
+        .arg(path)
+        .output()
+        .context("failed to run `git diff` for a history commit")?;
+    if out.stdout.is_empty() && !out.stderr.is_empty() {
+        bail!(
+            "git diff failed for {path} at {commit}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_file_history_handles_multiple_records_and_rename_paths() {
+        // Two commits; the older one has a different (pre-rename) path and a
+        // subject that itself contains the field separator — splitn(3) must
+        // keep it intact.
+        let out = "\u{1}aaa\u{1f}a1\u{1f}newest\n\nnew.rs\n\n\u{1}bbb\u{1f}b1\u{1f}has \u{1f} inside\n\nold.rs\n";
+        let parsed = parse_file_history(out);
+        assert_eq!(
+            parsed,
+            vec![
+                (
+                    "aaa".to_string(),
+                    "a1".to_string(),
+                    "newest".to_string(),
+                    "new.rs".to_string()
+                ),
+                (
+                    "bbb".to_string(),
+                    "b1".to_string(),
+                    "has \u{1f} inside".to_string(),
+                    "old.rs".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_file_history_skips_malformed_records_and_empty_output() {
+        assert!(parse_file_history("").is_empty());
+        // A record with no path line (e.g. history simplification artifacts)
+        // is dropped rather than panicking.
+        assert!(parse_file_history("\u{1}aaa\u{1f}a1\u{1f}subject\n\n").is_empty());
+        // A head line missing the separators is dropped.
+        assert!(parse_file_history("\u{1}garbage\n\npath.rs\n").is_empty());
+    }
+
+    /// Run git in `dir`, isolated from the user's global/system config so
+    /// options like commit signing can't break the scratch repo.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn scratch_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path();
+        git(p, &["init", "-b", "main"]);
+        git(p, &["config", "user.name", "t"]);
+        git(p, &["config", "user.email", "t@t"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+        dir
+    }
+
+    fn commit_file(dir: &Path, path: &str, contents: &str, msg: &str) {
+        std::fs::write(dir.join(path), contents).expect("write");
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-m", msg]);
+    }
+
+    #[test]
+    fn file_history_follows_renames_and_orders_newest_first() {
+        let repo = scratch_repo();
+        let p = repo.path();
+        commit_file(p, "a.txt", "one\n", "add a");
+        commit_file(p, "a.txt", "one\ntwo\n", "grow a");
+        git(p, &["mv", "a.txt", "b.txt"]);
+        git(p, &["commit", "-m", "rename a to b"]);
+
+        let hist = file_history(p, "b.txt", &HashSet::new()).unwrap();
+        let subjects: Vec<&str> = hist.iter().map(|h| h.subject.as_str()).collect();
+        assert_eq!(subjects, ["rename a to b", "grow a", "add a"]);
+        // Pre-rename commits must report the file's old name, so their diffs
+        // can be produced with the pathspec git actually knows them by.
+        let paths: Vec<&str> = hist.iter().map(|h| h.path_at_commit.as_str()).collect();
+        assert_eq!(paths, ["b.txt", "a.txt", "a.txt"]);
+        // Empty branch set = pill suppressed everywhere.
+        assert!(hist.iter().all(|h| !h.pre_branch));
+    }
+
+    #[test]
+    fn commit_diff_renders_root_commit_as_fully_added() {
+        let repo = scratch_repo();
+        let p = repo.path();
+        commit_file(p, "a.txt", "hello\n", "add a");
+        let hist = file_history(p, "a.txt", &HashSet::new()).unwrap();
+        let raw = commit_diff(p, &hist[0].hash, &hist[0].path_at_commit).unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.contains("hello"),
+            "root-commit diff via EMPTY_TREE shows the file's lines: {text}"
+        );
+    }
+
+    #[test]
+    fn commit_diff_across_a_rename_uses_the_old_path() {
+        let repo = scratch_repo();
+        let p = repo.path();
+        commit_file(p, "a.txt", "one\n", "add a");
+        commit_file(p, "a.txt", "one\ntwo\n", "grow a");
+        git(p, &["mv", "a.txt", "b.txt"]);
+        git(p, &["commit", "-m", "rename a to b"]);
+
+        let hist = file_history(p, "b.txt", &HashSet::new()).unwrap();
+        // "grow a" happened while the file was still a.txt.
+        let raw = commit_diff(p, &hist[1].hash, &hist[1].path_at_commit).unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.contains("two"),
+            "pre-rename commit diff is non-empty: {text}"
+        );
+    }
+
+    #[test]
+    fn branch_commits_flags_only_branch_work_and_is_empty_on_the_base_branch() {
+        let repo = scratch_repo();
+        let p = repo.path();
+        commit_file(p, "a.txt", "one\n", "on main");
+        // Sitting on main itself: merge base == HEAD → empty set → pill off.
+        assert!(branch_commits(p).is_empty());
+
+        git(p, &["checkout", "-b", "feature"]);
+        commit_file(p, "a.txt", "one\ntwo\n", "on feature");
+        let branch = branch_commits(p);
+        assert_eq!(branch.len(), 1);
+
+        let hist = file_history(p, "a.txt", &branch).unwrap();
+        assert_eq!(hist.len(), 2);
+        assert!(!hist[0].pre_branch); // "on feature" is the branch's own work
+        assert!(hist[1].pre_branch); // "on main" predates the branch
+    }
 }
